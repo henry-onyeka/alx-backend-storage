@@ -21,4 +21,3 @@ if __name__ == '__main__':
 
     print('{} status check'.format(collection.count_documents(
           {'method': 'GET', 'path': '/status'})))
-    
