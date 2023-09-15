@@ -1,43 +1,126 @@
 #!/usr/bin/env python3
-""" Module for Redis db """
+"""
+Defines a Cache class that implements redis storage implicitly
+"""
+import uuid
 import redis
-from uuid import uuid4
-from typing import Union, Callable, Optional
+from functools import wraps
+from typing import Union, Callable
 
 
-UnionOfTypes = Union[str, bytes, int, float]
+def call_history(method: Callable) -> Callable:
+    """
+    Create and return function that stores
+    the inputs and outputs each time a method is called
+    Args:
+        method (Calllable): function to be wrapped
+    Returns:
+        A wrapper function
+    """
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        """
+        Stores input and output values of a method
+        """
+        input_key = method.__qualname__ + ':inputs'
+        output_key = method.__qualname__ + ':outputs'
+        self._redis.rpush(input_key, str(args))
+        output = method(self, *args, **kwargs)
+        self._redis.rpush(output_key, output)
+        return output
+    return wrapper
 
 
-class Cache:
-    """ Class for methods that operate a caching system """
+def count_calls(method: Callable) -> Callable:
+    """
+    Create and return function that increments the count
+    for that key every time the method is called and returns
+    the value returned by the original method
+    Args:
+        method (Callable): function to be wrapped
+    Returns:
+        A wrapper function
+    """
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        """
+        Increments `method` count and calls `method`
+        """
+        self._redis.incr(method.__qualname__)
+        return method(self, *args, **kwargs)
+    return wrapper
 
-    def __init__(self):
-        """ Instance of the Redis db """
+
+class Cache(object):
+    """
+    Implements caching using redis storage
+    """
+    def __init__(self) -> None:
+        """
+        Class instantiation method
+        """
         self._redis = redis.Redis()
         self._redis.flushdb()
 
-    def store(self, data: UnionOfTypes) -> str:
+    @call_history
+    @count_calls
+    def store(self, data: Union[str, bytes, int, float]) -> str:
         """
-        Method takes a data argument and returns a string
+        Generate a random key (e.g. using uuid),
+        store the input data in Redis using the random key and return the key
+        Args:
+            data: value to be stored against the generated key
+        Returns:
+            (str): the randomly generated key
         """
-        self._key = str(uuid4())
-        self._redis.set(self._key, data)
-        return self._key
+        key = str(uuid.uuid4())
+        self._redis.set(key, data)
+        return key
 
     def get(self, key: str,
-            fn: Optional[Callable] = None) -> UnionOfTypes:
+            fn: Callable = None) -> Union[str, bytes, int, float]:
         """
-        Retrieves data stored in redis using a key
-        converts the result/value back to the desired format
+        Retrieves value of `key` from Redis storage
         """
         value = self._redis.get(key)
-        return fn(value) if fn else value
+        return value if fn is None else fn(value)
 
-    def get_str(self, value: str) -> str:
-        """ get a string """
-        return self.get(self._key, str)
+    def get_str(self, key: str) -> str:
+        """
+        Calls get method with fn as a byte to string function
+        Args:
+            key (str): key to search for
+        Returns:
+            value (str): value mapped to the provide `key`
+        """
+        return self.get(key, lambda s: s.decode('utf-8'))
 
-    def get_int(self, value: str) -> int:
-        """ get an int """
-        return self.get(self._key, int)
+    def get_int(self, key: str) -> int:
+        """
+        Calls get method with fn as a byte to int function
+        Args:
+            key (str): key to search for
+        Returns:
+            value (int): value mapped to the provide `key`
+        """
+        return self.get(key, lambda n: int(n))
 
+
+def replay(fn: Callable) -> None:
+    """
+    Display the history of calls of a particular function.
+    Args:
+        fn (Callable): a function whose history to display
+    """
+    display = ''
+    fnName = fn.__qualname__
+    ikey = '{}:inputs'.format(fn.__qualname__)
+    okey = '{}:outputs'.format(fn.__qualname__)
+    cache = redis.Redis()
+    if not cache.exists(ikey):
+        return
+    display += '{} was called {} times:\n'.format(fnName, cache.llen(ikey))
+    for i, o in zip(cache.lrange(ikey, 0, -1), cache.lrange(okey, 0, -1)):
+        display += "{}(*{}) -> {}\n".format(
+            fnName, i.decode('utf-8'), o.decode('utf-8'))
+    print(display, end="")
